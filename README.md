@@ -103,3 +103,81 @@ Extrait pour le premier fichier :
 ```
 
 Chaque bloc existe donc bien sur les trois datanodes a la fois, la perte d'un noeud ne fait perdre aucune donnee.
+
+## Etape 4 : cluster Spark standalone sur le meme reseau
+
+J'ajoute au docker compose un master Spark et deux workers avec l'image officielle apache/spark en version 3.5.3. Les trois conteneurs rejoignent le reseau entrepot_net, le meme que le cluster HDFS, ce qui permet a Spark de resoudre le nom namenode et de lire ou ecrire directement en hdfs://namenode:9000. Aucun volume n'est monte sur les conteneurs Spark, c'est le point exige par le sujet : rien ne transite par un chemin local ni par un volume partage.
+
+L'image officielle ne demarre aucun processus toute seule, je lance donc moi meme les classes du mode standalone. Le master ecoute sur le port 7077 et son interface web sort sur le port 8081 de ma machine car le 8080 etait deja occupe par un autre projet. Chaque worker s'enregistre aupres de spark://spark-master:7077 avec un coeur et un gigaoctet de memoire.
+
+```
+docker compose up -d
+```
+
+L'interface http://localhost:8081 montre le master avec ses deux workers en etat ALIVE. Je valide ensuite la lecture directe de HDFS depuis le cluster :
+
+```
+docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /tmp/test_lecture.py
+```
+
+Le test lit hdfs://namenode:9000/data/commandes et retourne 3000 lignes, soit mes trois fichiers de 1000 commandes lus en un seul DataFrame reparti sur 2 partitions.
+
+## Etape 5 : job d'agregation et ecriture Parquet dans HDFS
+
+Le job `jobs/agregation_ventes.py` fait tout le travail demande. Je declare un schema explicite avec StructType pour typer correctement chaque colonne, date en DateType, quantite en IntegerType, prix_unitaire en DoubleType, plutot que de laisser l'inference tout mettre en chaine de caracteres. Je lis les trois CSV en un seul DataFrame, je calcule le montant de chaque commande, puis je groupe par entrepot et par date pour obtenir le chiffre d'affaires total, le nombre de commandes et le panier moyen. Le resultat est ecrit au format Parquet dans hdfs://namenode:9000/resultats/ventes_agregees.
+
+Execution :
+
+```
+docker cp jobs/agregation_ventes.py spark-master:/tmp/agregation_ventes.py
+docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --driver-memory 512m --executor-memory 512m /tmp/agregation_ventes.py
+```
+
+Resultat obtenu :
+
+```
++-------------+----------+----------------+------------+------------+
+|entrepot     |date      |chiffre_affaires|nb_commandes|panier_moyen|
++-------------+----------+----------------+------------+------------+
+|Entrepot Est |2026-06-12|69854.32        |195         |358.23      |
+|Entrepot Est |2026-06-13|62843.82        |213         |295.04      |
+|Entrepot Est |2026-06-14|65872.82        |189         |348.53      |
+|Entrepot Nord|2026-06-12|165671.71       |493         |336.05      |
+|Entrepot Nord|2026-06-13|196025.72       |515         |380.63      |
+|Entrepot Nord|2026-06-14|188460.49       |501         |376.17      |
+|Entrepot Sud |2026-06-12|97317.95        |312         |311.92      |
+|Entrepot Sud |2026-06-13|100965.93       |272         |371.2       |
+|Entrepot Sud |2026-06-14|112708.42       |310         |363.58      |
++-------------+----------+----------------+------------+------------+
+```
+
+La repartition du chiffre d'affaires colle aux poids du generateur, environ la moitie pour le Nord, un tiers pour le Sud et un cinquieme pour l'Est. Je verifie la presence du Parquet dans HDFS :
+
+```
+docker exec namenode hdfs dfs -ls /resultats/ventes_agregees
+```
+
+Le repertoire contient le fichier _SUCCESS et un fichier part en snappy.parquet, ecrits avec une replication de 3.
+
+## Etape 6 : tolerance aux pannes, arret d'un datanode pendant un job
+
+La preuve de replication avant la panne est le fichier `preuves/etape3_fsck_apres_chargement.txt`, chaque bloc y affiche Live_repl=3. J'arrete ensuite un datanode puis je relance le job d'agregation pendant que le cluster est ampute d'un noeud :
+
+```
+docker stop datanode3
+docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 --driver-memory 512m --executor-memory 512m /tmp/agregation_ventes.py
+```
+
+Le job reussit et produit exactement les memes agregats. Il ne peut pas echouer pour cause de donnees manquantes : chaque bloc des CSV existe en trois exemplaires, donc meme sans datanode3 le client Spark trouve toujours une replique vivante sur datanode1 ou datanode2. Quand une lecture tombe sur le noeud mort, le client HDFS bascule simplement sur une autre replique et le job continue.
+
+La preuve apres la panne est dans `preuves/etape6_fsck_apres_panne.txt`, capturee juste apres le job. On y voit :
+
+1. Le nouveau fichier Parquet ecrit pendant la panne est signale Under replicated, la cible est 3 repliques mais il n'en a qu'une vivante, le cluster n'avait plus assez de noeuds pour tenir le facteur 3 au moment de l'ecriture.
+2. La replication moyenne du cluster est tombee de 3.0 a 2.8.
+3. Le statut global reste HEALTHY, aucun bloc n'est manquant ni corrompu, seules des repliques manquent.
+
+C'est exactement le comportement attendu d'HDFS : la panne d'un datanode ne fait rien perdre tant que le facteur de replication est superieur au nombre de noeuds perdus. Une fois le delai de detection passe, le namenode declare le noeud mort et reconstruit automatiquement les repliques manquantes sur les noeuds restants. Apres redemarrage de datanode3 avec docker start, les blocs sous repliques retrouvent leurs trois copies.
+
+## Bilan
+
+Le stockage ne depend plus du disque d'une seule machine. Les journaux sont decoupes en blocs et tripliques sur un cluster HDFS, Spark lit et ecrit directement en hdfs:// a travers le reseau Docker, les rapports agreges sont disponibles en Parquet dans HDFS, et la perte d'un datanode ne fait ni echouer les jobs ni perdre de donnees.
