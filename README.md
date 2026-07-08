@@ -59,6 +59,10 @@ docker exec namenode hdfs getconf -confKey fs.defaultFS
 
 J'obtiens 3, 32768 et hdfs://namenode:9000. L'interface web du namenode est accessible sur http://localhost:9870 et l'onglet Datanodes montre les trois noeuds vivants.
 
+![Vue d'ensemble du namenode actif sur namenode:9000](images/1.png)
+
+![Stockage du namenode avec les trois noeuds en service](images/3_hadoop.png)
+
 ## Etape 3 : chargement des fichiers dans HDFS
 
 Les CSV sont sur ma machine hote et le sujet interdit le simple partage par volume. Je copie donc les fichiers dans le conteneur du namenode avec docker cp puis je les charge dans HDFS avec la commande hdfs dfs. C'est cette deuxieme commande qui fait le vrai travail : le client HDFS decoupe chaque fichier en blocs et le namenode orchestre leur replication sur les datanodes.
@@ -114,7 +118,11 @@ L'image officielle ne demarre aucun processus toute seule, je lance donc moi mem
 docker compose up -d
 ```
 
-L'interface http://localhost:8081 montre le master avec ses deux workers en etat ALIVE. Je valide ensuite la lecture directe de HDFS depuis le cluster :
+L'interface http://localhost:8081 montre le master avec ses deux workers en etat ALIVE. On y voit aussi l'historique des applications terminees, mon test de lecture puis les deux executions du job d'agregation, toutes en etat FINISHED.
+
+![Master spark avec ses deux workers vivants et les applications terminees](images/spark_master.png)
+
+Je valide ensuite la lecture directe de HDFS depuis le cluster :
 
 ```
 docker exec spark-master /opt/spark/bin/spark-submit --master spark://spark-master:7077 /tmp/test_lecture.py
@@ -177,6 +185,10 @@ La preuve apres la panne est dans `preuves/etape6_fsck_apres_panne.txt`, capture
 3. Le statut global reste HEALTHY, aucun bloc n'est manquant ni corrompu, seules des repliques manquent.
 
 C'est exactement le comportement attendu d'HDFS : la panne d'un datanode ne fait rien perdre tant que le facteur de replication est superieur au nombre de noeuds perdus. Une fois le delai de detection passe, le namenode declare le noeud mort et reconstruit automatiquement les repliques manquantes sur les noeuds restants. Apres redemarrage de datanode3 avec docker start, les blocs sous repliques retrouvent leurs trois copies.
+
+La capture suivante, prise apres le redemarrage de datanode3, montre le cluster revenu a la normale : 3 noeuds vivants, aucun noeud mort, 10 blocs au total en comptant le parquet, et plus aucun bloc sous replique.
+
+![Cluster revenu a la normale apres redemarrage du datanode](images/2_summary.png)
 
 ## Bilan
 
