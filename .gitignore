@@ -1,0 +1,5 @@
+commandes_*.csv
+.claude/
+skills-lock.json
+__pycache__/
+*.pyc
