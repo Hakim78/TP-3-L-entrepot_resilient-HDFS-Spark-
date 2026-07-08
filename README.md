@@ -58,3 +58,48 @@ docker exec namenode hdfs getconf -confKey fs.defaultFS
 ```
 
 J'obtiens 3, 32768 et hdfs://namenode:9000. L'interface web du namenode est accessible sur http://localhost:9870 et l'onglet Datanodes montre les trois noeuds vivants.
+
+## Etape 3 : chargement des fichiers dans HDFS
+
+Les CSV sont sur ma machine hote et le sujet interdit le simple partage par volume. Je copie donc les fichiers dans le conteneur du namenode avec docker cp puis je les charge dans HDFS avec la commande hdfs dfs. C'est cette deuxieme commande qui fait le vrai travail : le client HDFS decoupe chaque fichier en blocs et le namenode orchestre leur replication sur les datanodes.
+
+```
+docker cp commandes_2026-06-12.csv namenode:/tmp/
+docker cp commandes_2026-06-13.csv namenode:/tmp/
+docker cp commandes_2026-06-14.csv namenode:/tmp/
+docker exec namenode hdfs dfs -mkdir -p /data/commandes
+docker exec namenode sh -c "hdfs dfs -put -f /tmp/commandes_*.csv /data/commandes/"
+docker exec namenode hdfs dfs -ls /data/commandes
+```
+
+Le listing confirme la presence des trois fichiers avec un facteur de replication de 3 :
+
+```
+Found 3 items
+-rw-r--r--   3 root supergroup      76353 2026-07-08 13:07 /data/commandes/commandes_2026-06-12.csv
+-rw-r--r--   3 root supergroup      76582 2026-07-08 13:07 /data/commandes/commandes_2026-06-13.csv
+-rw-r--r--   3 root supergroup      76371 2026-07-08 13:07 /data/commandes/commandes_2026-06-14.csv
+```
+
+Pour prouver le decoupage en blocs et leur repartition je lance fsck :
+
+```
+docker exec namenode hdfs fsck /data/commandes -files -blocks -locations
+```
+
+La sortie complete est archivee dans `preuves/etape3_fsck_apres_chargement.txt`. Ce qu'elle montre :
+
+1. Chaque fichier de 76 Ko est decoupe en 3 blocs, deux blocs pleins de 32768 octets et un dernier bloc plus petit qui porte le reste.
+2. Chaque bloc affiche Live_repl=3 avec les adresses des trois datanodes qui en detiennent une copie.
+3. Le resume global annonce 9 blocs valides, une replication moyenne de 3.0, aucun bloc manquant ni sous replique, et le statut HEALTHY.
+
+Extrait pour le premier fichier :
+
+```
+/data/commandes/commandes_2026-06-12.csv 76353 bytes, replicated: replication=3, 3 block(s):  OK
+0. blk_1073741825_1001 len=32768 Live_repl=3 [172.26.0.3:9866, 172.26.0.4:9866, 172.26.0.2:9866]
+1. blk_1073741826_1002 len=32768 Live_repl=3 [172.26.0.4:9866, 172.26.0.3:9866, 172.26.0.2:9866]
+2. blk_1073741827_1003 len=10817 Live_repl=3 [172.26.0.3:9866, 172.26.0.4:9866, 172.26.0.2:9866]
+```
+
+Chaque bloc existe donc bien sur les trois datanodes a la fois, la perte d'un noeud ne fait perdre aucune donnee.
