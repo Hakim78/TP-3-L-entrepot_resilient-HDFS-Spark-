@@ -57,6 +57,38 @@ services:
     networks:
       - entrepot_net
 
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark-master
+    hostname: spark-master
+    # img dont start alone, donc je start le master moi mm
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master", "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    ports:
+      # le port 8080 de ma machine est deja pris par un autre projet donc je publie l'interface du master sur 8081
+      - "8081:8080"
+    networks:
+      - entrepot_net
+
+  spark-worker1:
+    image: apache/spark:3.5.3
+    container_name: spark-worker1
+    hostname: spark-worker1
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--cores", "1", "--memory", "1g"]
+    depends_on:
+      - spark-master
+    networks:
+      - entrepot_net
+
+  spark-worker2:
+    image: apache/spark:3.5.3
+    container_name: spark-worker2
+    hostname: spark-worker2
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077", "--cores", "1", "--memory", "1g"]
+    depends_on:
+      - spark-master
+    networks:
+      - entrepot_net
+
 volumes:
   namenode_data:
   datanode1_data:
