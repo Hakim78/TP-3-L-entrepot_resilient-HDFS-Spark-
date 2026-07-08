@@ -3,3 +3,4 @@ commandes_*.csv
 skills-lock.json
 __pycache__/
 *.pyc
+.gitignore
